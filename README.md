@@ -76,6 +76,30 @@ For more information see the [faster-whisper docs](https://github.com/SYSTRAN/fa
 
 This image can be run with a read-only container filesystem. For details please [read the docs](https://docs.linuxserver.io/misc/read-only/).
 
+## HTTP Bridge
+
+This fork adds an optional HTTP→Wyoming bridge that runs alongside the whisper server. When enabled via `HTTP_BRIDGE_PORT`, the container exposes a REST API for clients that cannot speak the Wyoming protocol natively (e.g., `curl`, remote Home Assistant behind NGINX).
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/stt` | Send WAV audio as binary body. Returns `{"text": "transcription"}`. |
+| `GET` | `/health` | Liveness check. Returns `{"status": "ok"}`. |
+
+### Enabling
+
+Set `HTTP_BRIDGE_PORT=8080`. The bridge will start only when this variable is present — omit it to keep the container running in Wyoming-only mode (fully backward-compatible).
+
+```bash
+curl -s -X POST --data-binary @audio.wav http://localhost:8080/stt
+# {"text": "this is what the audio says"}
+```
+
+### Security
+
+The bridge has **no built-in authentication**. Place it behind a reverse proxy (NGINX, Caddy) with Bearer token or client certificate auth before exposing it to the internet.
+
 ## Usage
 
 To help you get started creating a container from this image you can either use docker-compose or the docker cli.
@@ -100,10 +124,12 @@ services:
       - WHISPER_BEAM=1 #optional
       - WHISPER_LANG=auto #optional
       - WHISPER_MODEL=auto #optional
+      - HTTP_BRIDGE_PORT=8080 #optional
     volumes:
       - /path/to/faster-whisper/data:/config
     ports:
       - 10300:10300
+      - 8080:8080 #optional
     restart: unless-stopped
 ```
 
@@ -120,7 +146,9 @@ docker run -d \
   -e WHISPER_BEAM=1 `#optional` \
   -e WHISPER_LANG=auto `#optional` \
   -e WHISPER_MODEL=auto `#optional` \
+  -e HTTP_BRIDGE_PORT=8080 `#optional` \
   -p 10300:10300 \
+  -p 8080:8080 `#optional` \
   -v /path/to/faster-whisper/data:/config \
   --restart unless-stopped \
   lscr.io/linuxserver/faster-whisper:latest
@@ -141,6 +169,7 @@ Containers are configured using parameters passed at runtime (such as those abov
 | `-e WHISPER_BEAM=1` | Number of candidates to consider simultaneously during transcription. |
 | `-e WHISPER_LANG=auto` | Two character code for the language that you will speak to the add-on. |
 | `-e WHISPER_MODEL=auto` | Whisper model that will be used for transcription. From [here](https://github.com/SYSTRAN/faster-whisper/blob/master/faster_whisper/utils.py#L11-L31). |
+| `-e HTTP_BRIDGE_PORT=8080` | Enable the HTTP→Wyoming REST bridge on the given port. When set, exposes `POST /stt` and `GET /health`. Omit to disable. |
 | `-v /config` | Local path for Whisper config files. |
 | `--read-only=true` | Run container with a read-only filesystem. Please [read the docs](https://docs.linuxserver.io/misc/read-only/). |
 

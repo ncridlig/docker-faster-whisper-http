@@ -1,0 +1,120 @@
+#!/lsiopy/bin/python3
+"""
+HTTP → Wyoming bridge for faster-whisper.
+Listens on HTTP_BRIDGE_PORT, proxies POST /stt to local Wyoming whisper.
+
+Endpoints:
+    POST /stt     — binary WAV audio body → {"text": "transcription"}
+    GET  /health  — {"status": "ok"}
+"""
+
+import asyncio
+import os
+import struct
+import sys
+
+from aiohttp import web
+
+# ── Wyoming wire format ──────────────────────────────────────────────
+AUDIO_CHUNK = 0
+TRANSCRIBE = 1
+TRANSCRIPT = 2
+ERROR = 5
+
+def _pack_msg(type_id: int, payload: bytes = b"") -> bytes:
+    return struct.pack(">II", type_id, len(payload)) + payload
+
+def _unpack_header(data: bytes):
+    if len(data) < 8:
+        return None, None, data
+    type_id = struct.unpack(">I", data[:4])[0]
+    length = struct.unpack(">I", data[4:8])[0]
+    return type_id, length, data[8:]
+
+
+async def wyoming_transcribe(host: str, port: int, wav_bytes: bytes, timeout: float = 30.0) -> str:
+    """Send WAV audio to Wyoming STT server, return transcription text."""
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port), timeout=5.0
+    )
+    try:
+        chunk_size = 4096
+        for offset in range(0, len(wav_bytes), chunk_size):
+            chunk = wav_bytes[offset : offset + chunk_size]
+            writer.write(_pack_msg(AUDIO_CHUNK, chunk))
+        writer.write(_pack_msg(TRANSCRIBE))
+        await writer.drain()
+
+        transcript_parts = []
+        buffer = b""
+        while True:
+            new_data = await asyncio.wait_for(reader.read(8192), timeout=timeout)
+            if not new_data:
+                break
+            buffer += new_data
+            while len(buffer) >= 8:
+                type_id, length, buffer = _unpack_header(buffer)
+                if type_id is None:
+                    break
+                while len(buffer) < length:
+                    extra = await asyncio.wait_for(
+                        reader.read(length - len(buffer)), timeout=timeout
+                    )
+                    if not extra:
+                        break
+                    buffer += extra
+                payload = buffer[:length]
+                buffer = buffer[length:]
+                if type_id == TRANSCRIPT:
+                    transcript_parts.append(payload.decode("utf-8"))
+                    if not payload and len(transcript_parts) > 1:
+                        return "".join(transcript_parts)
+                elif type_id == ERROR:
+                    return "[error: " + payload.decode("utf-8", errors="replace") + "]"
+        return "".join(transcript_parts)
+    except Exception:
+        raise
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+# ── HTTP handlers ────────────────────────────────────────────────────
+STT_HOST = os.environ.get("WHISPER_HOST", "127.0.0.1")
+STT_PORT = int(os.environ.get("WHISPER_PORT", "10300"))
+BRIDGE_PORT = int(os.environ.get("HTTP_BRIDGE_PORT", "0"))
+
+routes = web.RouteTableDef()
+
+
+@routes.get("/health")
+async def health(_request):
+    return web.json_response({"status": "ok"})
+
+
+@routes.post("/stt")
+async def handle_stt(request):
+    audio_data = await request.read()
+    if not audio_data:
+        return web.json_response({"error": "no audio data"}, status=400)
+
+    text = await wyoming_transcribe(STT_HOST, STT_PORT, audio_data)
+    return web.json_response({"text": text})
+
+
+def main():
+    if not BRIDGE_PORT:
+        print("HTTP_BRIDGE_PORT not set — exiting", file=sys.stderr)
+        sys.exit(0)
+
+    app = web.Application()
+    app.add_routes(routes)
+    print(f"HTTP bridge listening on 0.0.0.0:{BRIDGE_PORT}", file=sys.stderr)
+    web.run_app(app, host="0.0.0.0", port=BRIDGE_PORT, print=lambda *a: None)
+
+
+if __name__ == "__main__":
+    main()

@@ -31,6 +31,8 @@ RUN \
     wheel && \
   pip install -U --no-cache-dir --find-links https://wheel-index.linuxserver.io/ubuntu/ \
     git+https://github.com/rhasspy/wyoming-faster-whisper@${WHISPER_VERSION} && \
+  pip install -U --no-cache-dir \
+    aiohttp~=3.9 && \
   printf "Linuxserver.io version: ${VERSION}\nBuild-date: ${BUILD_DATE}" > /build_version && \
   echo "**** cleanup ****" && \
   apt-get purge -y --auto-remove \
@@ -46,3 +48,4 @@ COPY root/ /
 VOLUME /config
 
 EXPOSE 10300
+EXPOSE 8080
