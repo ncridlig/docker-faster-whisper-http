@@ -55,10 +55,14 @@ def _ensure_wav(audio_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
+_STT_TIMEOUT = int(os.environ.get("WHISPER_TIMEOUT", "60"))
+
+
 async def wyoming_transcribe(
-    host: str, port: int, wav_bytes: bytes, timeout: float = 30.0
+    host: str, port: int, wav_bytes: bytes, timeout: float = None
 ) -> str:
     """Send WAV audio to Wyoming STT server, return transcription text."""
+    effective_timeout = timeout if timeout is not None else _STT_TIMEOUT
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(host, port), timeout=5.0
     )
@@ -87,7 +91,7 @@ async def wyoming_transcribe(
         transcript_parts = []
         while True:
             event = await asyncio.wait_for(
-                async_read_event(reader), timeout=timeout
+                async_read_event(reader), timeout=effective_timeout
             )
             if event is None:
                 break
