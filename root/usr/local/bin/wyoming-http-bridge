@@ -102,12 +102,17 @@ BRIDGE_PORT = int(os.environ.get("HTTP_BRIDGE_PORT", "0"))
 routes = web.RouteTableDef()
 
 
+_PREFIX = os.environ.get("URL_PREFIX", "/whisper")
+
+
 @routes.get("/health")
+@routes.get(f"{_PREFIX}/health")
 async def health(_request):
     return web.json_response({"status": "ok"})
 
 
 @routes.post("/stt")
+@routes.post(f"{_PREFIX}/stt")
 async def handle_stt(request):
     audio_data = await request.read()
     if not audio_data:
