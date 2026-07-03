@@ -4,15 +4,20 @@ HTTP → Wyoming bridge for faster-whisper.
 Uses the official wyoming library for wire protocol.
 
 Endpoints:
-    POST /stt     — binary WAV audio body → {"text": "transcription"}
-    GET  /health  — {"status": "ok"}
+    POST /stt                          — binary WAV audio → {"text": "..."}
+    POST /v1/audio/transcriptions      — OpenAI-compatible (multipart/form-data)
+    GET  /health                       — {"status": "ok"}
 """
 
 import asyncio
+import io
+import json
 import os
 import sys
+import tempfile
+import wave
 
-from aiohttp import web
+from aiohttp import web, MultipartReader
 
 # Wyoming protocol types
 from wyoming.asr import Transcribe, Transcript
@@ -35,6 +40,21 @@ def _wav_to_pcm(wav_bytes: bytes) -> bytes:
     return wav_bytes[44:]
 
 
+def _ensure_wav(audio_bytes: bytes) -> bytes:
+    """Convert raw PCM to WAV if it's not already WAV."""
+    if audio_bytes[:4] == b"RIFF":
+        return audio_bytes  # Already WAV
+
+    # Assume raw PCM 16kHz 16-bit mono, wrap in WAV
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(audio_bytes)
+    return buf.getvalue()
+
+
 async def wyoming_transcribe(
     host: str, port: int, wav_bytes: bytes, timeout: float = 30.0
 ) -> str:
@@ -43,7 +63,6 @@ async def wyoming_transcribe(
         asyncio.open_connection(host, port), timeout=5.0
     )
     try:
-        # Extract raw PCM from WAV
         pcm_data = _wav_to_pcm(wav_bytes)
 
         # Send audio in 4KB chunks
@@ -60,11 +79,11 @@ async def wyoming_transcribe(
                 writer,
             )
 
-        # Signal end of audio — THIS triggers transcription
+        # AudioStop triggers transcription
         await async_write_event(AudioStop().event(), writer)
         await writer.drain()
 
-        # Read response — collect Transcript events
+        # Collect Transcript events
         transcript_parts = []
         while True:
             event = await asyncio.wait_for(
@@ -77,7 +96,6 @@ async def wyoming_transcribe(
                 if transcript.text:
                     transcript_parts.append(transcript.text)
                 else:
-                    # Empty text signals end
                     break
 
         return " ".join(transcript_parts)
@@ -98,11 +116,9 @@ async def wyoming_transcribe(
 STT_HOST = os.environ.get("WHISPER_HOST", "127.0.0.1")
 STT_PORT = int(os.environ.get("WHISPER_PORT", "10300"))
 BRIDGE_PORT = int(os.environ.get("HTTP_BRIDGE_PORT", "0"))
+_PREFIX = os.environ.get("URL_PREFIX", "/whisper")
 
 routes = web.RouteTableDef()
-
-
-_PREFIX = os.environ.get("URL_PREFIX", "/whisper")
 
 
 @routes.get("/health")
@@ -119,6 +135,59 @@ async def handle_stt(request):
         return web.json_response({"error": "no audio data"}, status=400)
 
     text = await wyoming_transcribe(STT_HOST, STT_PORT, audio_data)
+    return web.json_response({"text": text})
+
+
+@routes.post("/v1/audio/transcriptions")
+@routes.post(f"{_PREFIX}/v1/audio/transcriptions")
+async def handle_openai_stt(request):
+    """
+    OpenAI-compatible STT endpoint.
+    
+    Accepts multipart/form-data with:
+      - file: the audio file (required)
+      - model: model name (optional, ignored - we use the configured model)
+      - language: language hint (optional, e.g. "en", "fr")
+      - response_format: "json" (default) or "text"
+    
+    Returns {"text": "..."} or plain text depending on response_format.
+    """
+    content_type = request.content_type or ""
+    audio_data = None
+    language = None
+    response_format = "json"
+
+    if "multipart/form-data" in content_type:
+        reader = MultipartReader.from_response(request)
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            field_name = part.name if part.name else ""
+            if field_name == "file":
+                audio_data = await part.read()
+            elif field_name == "language":
+                language = (await part.text()).strip()
+            elif field_name == "response_format":
+                response_format = (await part.text()).strip()
+            elif field_name == "model":
+                # Ignored — we transcribe with whatever the server has
+                pass
+    else:
+        # Fallback: read raw body (for backward compat)
+        audio_data = await request.read()
+
+    if not audio_data:
+        return web.json_response(
+            {"error": "no audio data provided"}, status=400
+        )
+
+    # Ensure it's WAV (Wyoming expects 16kHz 16-bit mono WAV)
+    wav_data = _ensure_wav(audio_data)
+    text = await wyoming_transcribe(STT_HOST, STT_PORT, wav_data)
+
+    if response_format == "text":
+        return web.Response(text=text, content_type="text/plain")
     return web.json_response({"text": text})
 
 
