@@ -30,6 +30,8 @@ RUN \
     pip \
     wheel && \
   pip install -U --no-cache-dir --find-links https://wheel-index.linuxserver.io/ubuntu/ \
+    nvidia-cublas-cu12 \
+    "nvidia-cudnn-cu12>=9.0,<10.0" \
     git+https://github.com/rhasspy/wyoming-faster-whisper@${WHISPER_VERSION} && \
   pip install -U --no-cache-dir \
     aiohttp~=3.9 && \
